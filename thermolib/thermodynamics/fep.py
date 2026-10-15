@@ -1317,7 +1317,7 @@ class FreeEnergySurface2D(object):
         return fes
 
     @classmethod
-    def from_txt(cls, fn, temp, cv1_col=0, cv2_col=1, f_col=2, cv1_input_unit='au', cv1_output_unit='au', cv2_input_unit='au', cv2_output_unit='au', f_output_unit='kjmol', f_input_unit='kjmol', cv1_label='CV1', cv2_label='CV2', f_label='F', delimiter=None, verbose=False):
+    def from_txt(cls, fn, temp, cv1_col=0, cv2_col=1, f_col=2, fstd_col=None, cv1_input_unit='au', cv1_output_unit='au', cv2_input_unit='au', cv2_output_unit='au', f_output_unit='kjmol', f_input_unit='kjmol', cv1_label='CV1', cv2_label='CV2', f_label='F', delimiter=None, verbose=False):
         '''
             Read the free energy surface on a 2D grid as function of two collective variables from a txt file. 
 
@@ -1376,6 +1376,11 @@ class FreeEnergySurface2D(object):
         cv1s = data[:,cv1_col]*parse_unit(cv1_input_unit)
         cv2s = data[:,cv2_col]*parse_unit(cv2_input_unit)
         fs = data[:,f_col]*parse_unit(f_input_unit)
+
+        fstds = None
+        if fstd_col is not None:
+            fstds = data[:,fstd_col]*parse_unit(f_input_unit)
+
         #unravel data so that cv1s and cv2s are 1D arrays and fs is a 2D array
         #with F[i,j] the free energy corresponding to cv1s[i] and cv2s[j]
         cv1us = np.unique(cv1s)
@@ -1390,6 +1395,12 @@ class FreeEnergySurface2D(object):
         assert len(np.unique(i1*N2 + i2))==N1*N2, 'Duplicate or missing grid points'
         fus = np.full((N1, N2), np.nan)
         fus[i1, i2] = np.where(np.isinf(fs), np.nan, fs) 
+
+        error = None
+        if fstds is not None:
+            stdus = np.full((N1, N2), np.nan)
+            stdus[i1, i2] = np.where(np.isinf(fs), np.nan, fstds)
+            error = GaussianDistribution(fus.copy(), stdus)
         
         cv1s = cv1us.copy()
         cv2s = cv2us.copy()
@@ -1401,7 +1412,7 @@ class FreeEnergySurface2D(object):
             cv2_min, cv2_max, cv2_delta, cv2_num = cv2s.min(), cv2s.max(), (cv2s[1:]-cv2s[:-1]).mean(), len(cv2s)
             print('CV1 grid [%s]: start = %.3e    end = %.3e    delta = %.3e    N = %i' %(cv1_output_unit, cv1_min/parse_unit(cv1_output_unit), cv1_max/parse_unit(cv1_output_unit), cv1_delta/parse_unit(cv1_output_unit), cv1_num))
             print('CV2 grid [%s]: start = %.3e    end = %.3e    delta = %.3e    N = %i' %(cv2_output_unit, cv2_min/parse_unit(cv2_output_unit), cv2_max/parse_unit(cv2_output_unit), cv2_delta/parse_unit(cv2_output_unit), cv2_num))
-        return cls(cv1s, cv2s, fs, temp, cv1_output_unit=cv1_output_unit, cv2_output_unit=cv2_output_unit, f_output_unit=f_output_unit, cv1_label=cv1_label, cv2_label=cv2_label, f_label=f_label)
+        return cls(cv1s, cv2s, fs, temp, error=error, cv1_output_unit=cv1_output_unit, cv2_output_unit=cv2_output_unit, f_output_unit=f_output_unit, cv1_label=cv1_label, cv2_label=cv2_label, f_label=f_label)
 
     @classmethod
     def from_histogram(cls, histogram, temp, cv1_output_unit=None, cv2_output_unit=None, cv1_label=None, cv2_label=None, f_output_unit='kjmol', f_label='F', propagator=Propagator()):
@@ -1476,22 +1487,26 @@ class FreeEnergySurface2D(object):
     def savetxt(self, fn_txt):
         '''
             Save the free energy profile to a txt file using numpy.savetxt. The units in which the CVs and free energy are written is specified in the attributes cv1_output_unit, cv2_output_unit and f_output_unit.
+            If the error is not None, the marginal standard deviation on the free energy is written in the fourth column
 
             :param fn_txt: name of the file to write fes to
             :type fn_txt: str
         '''
         header = '%s [%s]\t %s [%s]\t Free energy [%s]' %(self.cv1_label, self.cv1_output_unit,self.cv2_label, self.cv2_output_unit, self.f_output_unit)
         yv, xv = np.meshgrid(self.cv2s, self.cv1s)
-        np.savetxt(
-            fn_txt, 
-            np.vstack((
-                xv.flatten()/parse_unit(self.cv1_output_unit),
-                yv.flatten()/parse_unit(self.cv2_output_unit),
-                self.fs.flatten()/parse_unit(self.f_output_unit)
-            )).T, 
-            header=header,
-            fmt='%f'
-        )
+        columns = [
+            xv.flatten()/parse_unit(self.cv1_output_unit),
+            yv.flatten()/parse_unit(self.cv2_output_unit),
+            self.fs.flatten()/parse_unit(self.f_output_unit),
+        ]
+        fmt = ['%f', '%f', '%f']
+
+        if self.error is not None:
+            header += '\t Free energy error (std) [%s]' %(self.f_output_unit)
+            columns.append(self.error.std().flatten()/parse_unit(self.f_output_unit))
+            fmt.append('%.6e') # be a bit more precise as the error can be very small
+
+        np.savetxt(fn_txt, np.vstack(columns).T, header=header, fmt=fmt)
 
     def set_ref(self, ref='min'):
         '''
